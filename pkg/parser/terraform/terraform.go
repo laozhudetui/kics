@@ -17,6 +17,13 @@ import (
 	"github.com/pkg/errors"
 )
 
+var variableTypeConverters = map[string]func(value cty.Value, source byte) (inputVariables, error){
+	"bool":   convertToBoolean,
+	"string": convertToString,
+	"tuple":  convertToList,
+	"object": convertToMap,
+}
+
 // RetriesDefaultValue is default number of times a parser will retry to execute
 const RetriesDefaultValue = 50
 
@@ -29,12 +36,13 @@ type Parser struct {
 	numOfRetries int
 }
 
-type tfvarsSource struct {
-	value  cty.Value
-	source byte
+type inputVariables struct {
+	value   interface{}
+	varType string
+	source  byte
 }
 
-type inputVariables map[string]tfvarsSource
+type varTable map[string]inputVariables
 
 // NewDefault initializes a parser with Parser default values
 func NewDefault() *Parser {
@@ -58,14 +66,14 @@ func (p *Parser) Resolve(fileContent []byte, filename string) (*[]byte, error) {
 		if value, ok := valueMap[keyIdentifier]; !ok {
 			fmt.Printf("error")
 		} else {
-			fmt.Printf("%s", value)
+			fmt.Printf("%v", value)
 		}
 		fmt.Printf("%q", identifier)
 	}
 	return &fileContent, nil
 }
 
-func getInputVariables(currentPath string) (inputVariables, error) {
+func getInputVariables(currentPath string) (varTable, error) {
 	terraformFilepath := filepath.Join(currentPath, "terraform.tfvars")
 	file, err := os.ReadFile(terraformFilepath)
 	if err != nil {
@@ -90,16 +98,23 @@ func getInputVariables(currentPath string) (inputVariables, error) {
 	}
 
 	attrs, _ := f.Body.JustAttributes()
-	iVariables := make(inputVariables, 0)
-	//Here need to change what to get
+	variables := make(varTable)
 	for name, attr := range attrs {
-		val, _ := attr.Expr.Value(nil)
-		iVariables[name] = tfvarsSource{
-			value:  val,
-			source: 't',
+		inputVar, err := getVariableValue(attr, 't')
+		if err != nil {
+			return nil, err
 		}
+		variables[name] = inputVar
 	}
-	return iVariables, nil
+	return variables, nil
+}
+
+func getVariableValue(attribute *hcl.Attribute, source byte) (inputVariables, error) {
+	val, _ := attribute.Expr.Value(nil)
+	if converterFunc, ok := variableTypeConverters[val.Type().FriendlyName()]; ok {
+		return converterFunc(val, source)
+	}
+	return inputVariables{}, fmt.Errorf("invalid variable type")
 }
 
 func checkTfvarsValid(f *hcl.File, filename string) error {
@@ -112,7 +127,7 @@ func checkTfvarsValid(f *hcl.File, filename string) error {
 		},
 	})
 	if len(content.Blocks) > 0 {
-		return fmt.Errorf("failed to get variables from %s, .tfvars file is used to assing values not to declare new variables.", filename)
+		return fmt.Errorf("failed to get variables from %s, .tfvars file is used to assing values not to declare new variables", filename)
 	}
 	return nil
 }
